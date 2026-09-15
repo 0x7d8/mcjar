@@ -1,4 +1,7 @@
-use crate::{env::RedisMode, response::ApiResponse};
+use crate::{
+    env::RedisMode,
+    response::{ApiResponse, DisplayError},
+};
 use rustis::{
     client::Client,
     commands::{
@@ -10,7 +13,11 @@ use rustis::{
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     future::Future,
-    sync::{Arc, atomic::AtomicUsize},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 #[derive(Serialize)]
@@ -30,6 +37,8 @@ return out
 const SCAN_COUNT: &str = "500";
 const SCAN_MAX_ROUNDS: usize = 64;
 
+const DEGRADED_FAIL_OPEN_WINDOW: Duration = Duration::from_secs(60);
+
 fn key_prefix(key: &str) -> &str {
     match key.match_indices("::").nth(1) {
         Some((index, _)) => &key[..index],
@@ -46,6 +55,11 @@ pub struct CounterEntry {
 
 pub struct Cache {
     pub client: Client,
+
+    started: Instant,
+    degraded_since: AtomicU64,
+    degraded_fallbacks: AtomicU64,
+    degraded_closed: AtomicBool,
 
     cache_hits: AtomicUsize,
     cache_misses: AtomicUsize,
@@ -70,6 +84,10 @@ impl Cache {
                 .await
                 .unwrap(),
             },
+            started: start,
+            degraded_since: AtomicU64::new(0),
+            degraded_fallbacks: AtomicU64::new(0),
+            degraded_closed: AtomicBool::new(false),
             cache_hits: AtomicUsize::new(0),
             cache_misses: AtomicUsize::new(0),
         };
@@ -90,6 +108,84 @@ impl Cache {
         );
 
         instance
+    }
+
+    #[inline]
+    fn now_millis(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64 + 1
+    }
+
+    fn fail_open(&self, err: &rustis::Error) -> bool {
+        if !err.is_connection_error() && !err.is_timeout() {
+            tracing::warn!(cache.error = %err, "cache command failed, using the database");
+
+            return true;
+        }
+
+        let now = self.now_millis();
+        let since = self.degraded_since.load(Ordering::Relaxed);
+
+        if since == 0 {
+            if self
+                .degraded_since
+                .compare_exchange(0, now, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.degraded_fallbacks.store(0, Ordering::Relaxed);
+
+                tracing::error!(
+                    cache.error = %err,
+                    "cache unreachable, using the database for the next {}s",
+                    DEGRADED_FAIL_OPEN_WINDOW.as_secs()
+                );
+            }
+
+            self.degraded_fallbacks.fetch_add(1, Ordering::Relaxed);
+
+            return true;
+        }
+
+        if now.saturating_sub(since) < DEGRADED_FAIL_OPEN_WINDOW.as_millis() as u64 {
+            self.degraded_fallbacks.fetch_add(1, Ordering::Relaxed);
+
+            return true;
+        }
+
+        if !self.degraded_closed.swap(true, Ordering::AcqRel) {
+            tracing::error!(
+                cache.error = %err,
+                "cache unreachable for {}s, rejecting requests ({} served from the database)",
+                DEGRADED_FAIL_OPEN_WINDOW.as_secs(),
+                self.degraded_fallbacks.load(Ordering::Relaxed)
+            );
+        }
+
+        false
+    }
+
+    fn mark_healthy(&self) {
+        if self.degraded_since.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+
+        let since = self.degraded_since.swap(0, Ordering::AcqRel);
+        self.degraded_closed.store(false, Ordering::Relaxed);
+
+        if since != 0 {
+            tracing::info!(
+                "cache reachable again after {}ms ({} requests served from the database)",
+                self.now_millis().saturating_sub(since),
+                self.degraded_fallbacks.load(Ordering::Relaxed)
+            );
+        }
+    }
+
+    #[inline]
+    fn unavailable() -> anyhow::Error {
+        anyhow::Error::new(
+            DisplayError::new("service temporarily unavailable")
+                .with_status(axum::http::StatusCode::SERVICE_UNAVAILABLE),
+        )
     }
 
     #[inline]
@@ -118,7 +214,20 @@ impl Cache {
         Fut: Future<Output = Result<T, FutErr>>,
         FutErr: Into<anyhow::Error> + Send + Sync + 'static,
     {
-        let cached_value: Option<BulkString> = self.client.get(key).await?;
+        let cached_value = match self.client.get::<Option<BulkString>>(key).await {
+            Ok(cached_value) => {
+                self.mark_healthy();
+
+                cached_value
+            }
+            Err(err) => {
+                if !self.fail_open(&err) {
+                    return Err(Self::unavailable());
+                }
+
+                None
+            }
+        };
 
         match cached_value.and_then(|v| rmp_serde::from_slice::<T>(&v).ok()) {
             Some(value) => {
@@ -138,14 +247,21 @@ impl Cache {
                 tracing::Span::current().record("cache.outcome", "miss");
 
                 let serialized = rmp_serde::to_vec(&result)?;
-                self.client
+                match self
+                    .client
                     .set_with_options(
                         key,
                         BulkStringRef(&serialized),
                         None,
                         SetExpiration::Ex(ttl),
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(_) => self.mark_healthy(),
+                    Err(err) => {
+                        self.fail_open(&err);
+                    }
+                }
 
                 Ok(result)
             }
@@ -175,9 +291,10 @@ impl Cache {
         };
 
         let limit_used = self.client.get::<u64>(&*key).await.unwrap_or_default() + 1;
-        self.client
+        let _ = self
+            .client
             .set_with_options(&*key, limit_used, None, SetExpiration::Exat(expire_unix))
-            .await?;
+            .await;
 
         if limit_used >= limit {
             return Err(ApiResponse::error(&format!(

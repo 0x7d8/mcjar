@@ -511,7 +511,11 @@ async fn main() {
                         .ok();
                 }
 
-                let path = &req.uri().path()[1..];
+                let Some(path) = req.uri().path().strip_prefix('/') else {
+                    return ApiResponse::error("invalid request path")
+                        .with_status(StatusCode::BAD_REQUEST)
+                        .ok();
+                };
 
                 if !path.is_empty()
                     && let Some(file) = FRONTEND_ASSETS.get_file(path)

@@ -72,7 +72,7 @@ pub fn router(state: &State) -> OpenApiRouter<State> {
                 .flatten();
             let organization = organization.as_ref();
 
-            let path = Path::new(&parts.uri.path()[1..]);
+            let path = Path::new(parts.uri.path().strip_prefix('/').unwrap_or_default());
 
             if path.components().any(|c| matches!(c, Component::ParentDir)) {
                 return render_not_found(&state, &format!("/{}", path.to_string_lossy()));
