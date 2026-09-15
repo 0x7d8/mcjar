@@ -381,10 +381,15 @@ mod post {
                 ),
 
                 build_count AS (
-                    SELECT count(*) AS count
-                    FROM builds
-                    WHERE version_id = (SELECT COALESCE(version_id, project_version_id) FROM spec_build)
-                        OR (version_id IS NULL AND project_version_id = (SELECT COALESCE(version_id, project_version_id) FROM spec_build))
+                    SELECT
+                        (
+                            SELECT count(*) FROM builds
+                            WHERE version_id = (SELECT COALESCE(version_id, project_version_id) FROM spec_build)
+                        ) + (
+                            SELECT count(*) FROM builds
+                            WHERE version_id IS NULL
+                                AND project_version_id = (SELECT COALESCE(version_id, project_version_id) FROM spec_build)
+                        ) AS count
                 )
     
                 SELECT

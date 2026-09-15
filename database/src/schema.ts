@@ -317,12 +317,12 @@ export const buildHashes = pgTable('build_hashes', {
 }, (hashes) => [
 	index('buildHashes_build_idx').on(hashes.buildId),
 	index('buildHashes_primary_idx').on(hashes.primary),
-	index('buildHashes_sha1_idx').on(hashes.sha1).with({ fillfactor: 100 }),
-	index('buildHashes_sha224_idx').on(hashes.sha224).with({ fillfactor: 100 }),
-	index('buildHashes_sha256_idx').on(hashes.sha256).with({ fillfactor: 100 }),
-	index('buildHashes_sha384_idx').on(hashes.sha384).with({ fillfactor: 100 }),
-	index('buildHashes_sha512_idx').on(hashes.sha512).with({ fillfactor: 100 }),
-	index('buildHashes_md5_idx').on(hashes.md5).with({ fillfactor: 100 })
+	index('buildHashes_sha1_idx').on(hashes.sha1).with({ fillfactor: 90 }),
+	index('buildHashes_sha224_idx').on(hashes.sha224).with({ fillfactor: 90 }),
+	index('buildHashes_sha256_idx').on(hashes.sha256).with({ fillfactor: 90 }),
+	index('buildHashes_sha384_idx').on(hashes.sha384).with({ fillfactor: 90 }),
+	index('buildHashes_sha512_idx').on(hashes.sha512).with({ fillfactor: 90 }),
+	index('buildHashes_md5_idx').on(hashes.md5).with({ fillfactor: 90 })
 ])
 
 export const buildHashesRelations = relations(buildHashes, ({ one }) => ({

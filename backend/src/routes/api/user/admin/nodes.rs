@@ -52,9 +52,9 @@ mod get {
         })?;
 
         let mut reported: HashMap<compact_str::CompactString, Reported> = fanned
-                .into_iter()
-                .map(|result| (result.node, (result.latency, result.data, result.error)))
-                .collect();
+            .into_iter()
+            .map(|result| (result.node, (result.latency, result.data, result.error)))
+            .collect();
 
         let local_system = SystemSnapshot::capture(&state).await?;
 

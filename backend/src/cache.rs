@@ -30,6 +30,13 @@ return out
 const SCAN_COUNT: &str = "500";
 const SCAN_MAX_ROUNDS: usize = 64;
 
+fn key_prefix(key: &str) -> &str {
+    match key.match_indices("::").nth(1) {
+        Some((index, _)) => &key[..index],
+        None => key,
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CounterEntry {
     pub key: String,
@@ -95,7 +102,10 @@ impl Cache {
         self.cache_misses.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    #[tracing::instrument(skip(self, fn_compute))]
+    #[tracing::instrument(
+        skip(self, fn_compute),
+        fields(cache.prefix = key_prefix(key), cache.outcome = tracing::field::Empty)
+    )]
     pub async fn cached<T, F, Fut, FutErr>(
         &self,
         key: &str,
@@ -114,6 +124,7 @@ impl Cache {
             Some(value) => {
                 self.cache_hits
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::Span::current().record("cache.outcome", "hit");
 
                 Ok(value)
             }
@@ -124,6 +135,7 @@ impl Cache {
                 };
                 self.cache_misses
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::Span::current().record("cache.outcome", "miss");
 
                 let serialized = rmp_serde::to_vec(&result)?;
                 self.client

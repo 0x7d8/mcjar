@@ -90,7 +90,8 @@ mod get {
                         Ok::<_, anyhow::Error>(data)
                     },
                     async {
-                        let requests_data = state.clickhouse
+                        let requests_data = state
+                            .clickhouse
                             .client()
                             .query(
                                 r#"
@@ -103,7 +104,7 @@ mod get {
                                     COUNT(*)
                                 FROM requests
                                 WHERE requests._partition_date >= toDate(now() - INTERVAL 366 DAY)
-                                "#
+                                "#,
                             )
                             .fetch_one::<(u64, u64, u64, u64, u64, u64)>()
                             .await?;

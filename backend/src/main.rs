@@ -21,6 +21,7 @@ use tower::Layer;
 use tower_cookies::CookieManagerLayer;
 use tower_http::{
     catch_panic::CatchPanicLayer, cors::CorsLayer, normalize_path::NormalizePathLayer,
+    timeout::RequestBodyTimeoutLayer,
 };
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, SecurityScheme};
 use utoipa_axum::router::OpenApiRouter;
@@ -34,6 +35,8 @@ const GIT_COMMIT: &str = env!("CARGO_GIT_COMMIT");
 
 const FRONTEND_ASSETS: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../frontend/lib/client");
 const SPA_FALLBACK: &str = "__spa-fallback.html";
+
+const REQUEST_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 fn content_type_for(extension: Option<&std::ffi::OsStr>) -> &'static str {
     match extension {
@@ -553,6 +556,7 @@ async fn main() {
                     .ok()
             })
             .layer(CatchPanicLayer::custom(handle_panic))
+            .layer(RequestBodyTimeoutLayer::new(REQUEST_BODY_TIMEOUT))
             .layer(CorsLayer::permissive().allow_methods([Method::GET, Method::POST]))
             .layer(axum::middleware::from_fn(handle_request))
             .layer(CookieManagerLayer::new())

@@ -371,10 +371,7 @@ pub async fn ratelimit_snapshot(
     cache: &crate::cache::Cache,
 ) -> Result<Vec<RateLimitSnapshot>, anyhow::Error> {
     let entries = cache
-        .scan_counters(
-            &format!("{RATELIMIT_KEY_PREFIX}*"),
-            SNAPSHOT_MAX_ENTRIES,
-        )
+        .scan_counters(&format!("{RATELIMIT_KEY_PREFIX}*"), SNAPSHOT_MAX_ENTRIES)
         .await?;
 
     let mut snapshots = Vec::with_capacity(entries.len());
@@ -399,10 +396,7 @@ pub async fn bandwidth_snapshot(
     cache: &crate::cache::Cache,
 ) -> Result<Vec<BandwidthSnapshot>, anyhow::Error> {
     let entries = cache
-        .scan_counters(
-            &format!("{BANDWIDTH_KEY_PREFIX}*"),
-            SNAPSHOT_MAX_ENTRIES,
-        )
+        .scan_counters(&format!("{BANDWIDTH_KEY_PREFIX}*"), SNAPSHOT_MAX_ENTRIES)
         .await?;
 
     let mut snapshots = Vec::with_capacity(entries.len());

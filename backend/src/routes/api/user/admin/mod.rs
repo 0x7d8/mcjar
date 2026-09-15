@@ -48,9 +48,8 @@ pub async fn fanout_with_local<T: serde::de::DeserializeOwned + Serialize>(
     path: &str,
     local: T,
 ) -> Result<Fanned<T>, anyhow::Error> {
-    let local_name = compact_str::CompactString::new(
-        state.env.server_name.as_deref().unwrap_or(UNNAMED_NODE),
-    );
+    let local_name =
+        compact_str::CompactString::new(state.env.server_name.as_deref().unwrap_or(UNNAMED_NODE));
 
     let mut nodes = vec![NodeStatus {
         node: local_name.clone(),

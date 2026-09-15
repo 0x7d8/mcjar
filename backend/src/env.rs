@@ -1,7 +1,7 @@
 use anyhow::Context;
 use dotenvy::dotenv;
 use std::sync::Arc;
-use tracing_subscriber::fmt::writer::MakeWriterExt;
+use tracing_subscriber::{fmt::writer::MakeWriterExt, layer::SubscriberExt};
 
 #[derive(Clone)]
 pub enum RedisMode {
@@ -283,7 +283,8 @@ impl Env {
                     } else {
                         tracing::Level::INFO
                     })
-                    .finish(),
+                    .finish()
+                    .with(sentry_tracing::layer().enable_span_attributes()),
             )?;
         } else {
             tracing::subscriber::set_global_default(
@@ -298,7 +299,8 @@ impl Env {
                     } else {
                         tracing::Level::INFO
                     })
-                    .finish(),
+                    .finish()
+                    .with(sentry_tracing::layer().enable_span_attributes()),
             )?;
         }
 
