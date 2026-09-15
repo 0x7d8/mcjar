@@ -460,3 +460,15 @@ export const chFileStatsDaily = pgTable('ch_file_stats_daily', {
   index('chFileStatsDaily_date_idx').on(t.dateOnly),
   index('chFileStatsDaily_day_idx').on(t.day),
 ]);
+
+export const nodes = pgTable('nodes', {
+	name: varchar('name', { length: 255 }).primaryKey().notNull(),
+
+	url: varchar('url', { length: 255 }).notNull(),
+	version: varchar('version', { length: 255 }).notNull(),
+
+	lastSeen: timestamp('last_seen').default(sql`now()`).notNull(),
+	created: timestamp('created').default(sql`now()`).notNull()
+}, (nodes) => [
+	index('nodes_last_seen_idx').on(nodes.lastSeen)
+])

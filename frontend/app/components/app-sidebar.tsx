@@ -8,6 +8,7 @@ import {
   HomeIcon,
   LogInIcon,
   LogOutIcon,
+  ShieldIcon,
   SkullIcon,
   TriangleAlertIcon,
 } from 'lucide-react';
@@ -300,6 +301,14 @@ export function AppSidebar() {
                     Organizations
                   </AutoCloseLink>
                 </DropdownMenuItem>
+                {user.admin && (
+                  <DropdownMenuItem asChild>
+                    <AutoCloseLink to={'/admin'} className={'w-full'}>
+                      <ShieldIcon size={24} />
+                      Administration
+                    </AutoCloseLink>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onClick={() => {

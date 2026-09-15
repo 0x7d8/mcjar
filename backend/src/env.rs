@@ -53,6 +53,9 @@ pub struct Env {
     pub app_cookie_domain: String,
     pub app_log_directory: Option<String>,
     pub server_name: Option<String>,
+
+    pub node_url: Option<String>,
+    pub node_secret: Option<String>,
 }
 
 impl Env {
@@ -226,6 +229,13 @@ impl Env {
                 .ok()
                 .map(|s| s.trim_matches('"').to_string()),
             server_name: std::env::var("SERVER_NAME")
+                .ok()
+                .map(|s| s.trim_matches('"').to_string()),
+
+            node_url: std::env::var("NODE_URL")
+                .ok()
+                .map(|s| s.trim_matches('"').trim_end_matches('/').to_string()),
+            node_secret: std::env::var("NODE_SECRET")
                 .ok()
                 .map(|s| s.trim_matches('"').to_string()),
         };

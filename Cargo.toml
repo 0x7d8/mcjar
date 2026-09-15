@@ -2,9 +2,6 @@
 resolver = "2"
 members = ["backend"]
 
-[patch.crates-io]
-compact_str = { git = "https://github.com/0x7d8/compact_str.git" }
-
 [profile.dev.package."*"]
 opt-level = 3
 

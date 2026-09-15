@@ -3,6 +3,7 @@ use utoipa_axum::{router::OpenApiRouter, routes};
 
 mod get {
     use crate::{
+        nodes::SystemSnapshot,
         response::{ApiResponse, ApiResponseResult},
         routes::GetState,
     };
@@ -12,7 +13,7 @@ mod get {
 
     #[derive(ToSchema, Serialize, Deserialize)]
     struct StatsRequests {
-        total: u64,
+        total: i64,
 
         minute: u64,
         hour: u64,
@@ -23,14 +24,9 @@ mod get {
     }
 
     #[derive(ToSchema, Serialize, Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    #[schema(rename_all = "camelCase")]
-    struct StatsInternal {
-        idle_read_connections: usize,
-        idle_write_connections: usize,
-
-        cache_hits: usize,
-        cache_misses: usize,
+    struct StatsNodes {
+        total: i64,
+        alive: i64,
     }
 
     #[derive(ToSchema, Serialize, Deserialize)]
@@ -41,9 +37,9 @@ mod get {
         webhooks: i64,
 
         #[schema(inline)]
-        requests: StatsRequests,
+        nodes: StatsNodes,
         #[schema(inline)]
-        internal: StatsInternal,
+        requests: StatsRequests,
     }
 
     #[derive(ToSchema, Serialize)]
@@ -52,6 +48,7 @@ mod get {
 
         #[schema(inline)]
         stats: Stats,
+        system: SystemSnapshot,
     }
 
     #[utoipa::path(get, path = "/", responses(
@@ -76,6 +73,15 @@ mod get {
                             UNION ALL
                             SELECT COUNT(*)
                             FROM webhooks
+                            UNION ALL
+                            SELECT COUNT(*)
+                            FROM nodes
+                            UNION ALL
+                            SELECT COUNT(*)
+                            FROM nodes
+                            WHERE nodes.last_seen > NOW() - INTERVAL '1 minute'
+                            UNION ALL
+                            SELECT COALESCE((SELECT value FROM counts WHERE key = 'requests'), 0)
                             "#,
                         )
                         .fetch_all(state.database.read())
@@ -89,17 +95,17 @@ mod get {
                             .query(
                                 r#"
                                 SELECT
-                                    COUNT(*), 
-                                    SUM(CASE WHEN requests.created > NOW() - INTERVAL '1 minute' THEN 1 ELSE 0 END),
-                                    SUM(CASE WHEN requests.created > NOW() - INTERVAL '1 hour' THEN 1 ELSE 0 END),
-                                    SUM(CASE WHEN requests.created > NOW() - INTERVAL '1 day' THEN 1 ELSE 0 END),
-                                    SUM(CASE WHEN requests.created > NOW() - INTERVAL '1 week' THEN 1 ELSE 0 END),
-                                    SUM(CASE WHEN requests.created > NOW() - INTERVAL '1 month' THEN 1 ELSE 0 END),
-                                    SUM(CASE WHEN requests.created > NOW() - INTERVAL '1 year' THEN 1 ELSE 0 END)
+                                    countIf(requests.created > NOW() - INTERVAL '1 minute'),
+                                    countIf(requests.created > NOW() - INTERVAL '1 hour'),
+                                    countIf(requests.created > NOW() - INTERVAL '1 day'),
+                                    countIf(requests.created > NOW() - INTERVAL '1 week'),
+                                    countIf(requests.created > NOW() - INTERVAL '1 month'),
+                                    COUNT(*)
                                 FROM requests
+                                WHERE requests._partition_date >= toDate(now() - INTERVAL 366 DAY)
                                 "#
                             )
-                            .fetch_one::<(u64, u64, u64, u64, u64, u64, u64)>()
+                            .fetch_one::<(u64, u64, u64, u64, u64, u64)>()
                             .await?;
 
                         Ok(requests_data)
@@ -111,22 +117,19 @@ mod get {
                     users: data[1].try_get(0)?,
                     sessions: data[2].try_get(0)?,
                     webhooks: data[3].try_get(0)?,
-                    requests: StatsRequests {
-                        total: requests_data.0,
-
-                        minute: requests_data.1,
-                        hour: requests_data.2,
-                        day: requests_data.3,
-                        week: requests_data.4,
-                        month: requests_data.5,
-                        year: requests_data.6,
+                    nodes: StatsNodes {
+                        total: data[4].try_get(0)?,
+                        alive: data[5].try_get(0)?,
                     },
-                    internal: StatsInternal {
-                        idle_read_connections: 0,
-                        idle_write_connections: 0,
+                    requests: StatsRequests {
+                        total: data[6].try_get(0)?,
 
-                        cache_hits: 0,
-                        cache_misses: 0,
+                        minute: requests_data.0,
+                        hour: requests_data.1,
+                        day: requests_data.2,
+                        week: requests_data.3,
+                        month: requests_data.4,
+                        year: requests_data.5,
                     },
                 })
             })
@@ -134,16 +137,8 @@ mod get {
 
         ApiResponse::new_serialized(Response {
             success: true,
-            stats: Stats {
-                internal: StatsInternal {
-                    idle_read_connections: state.database.read().num_idle(),
-                    idle_write_connections: state.database.write().num_idle(),
-
-                    cache_hits: state.cache.cache_hits(),
-                    cache_misses: state.cache.cache_misses(),
-                },
-                ..stats
-            },
+            stats,
+            system: SystemSnapshot::capture(&state).await?,
         })
         .ok()
     }

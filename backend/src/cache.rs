@@ -1,7 +1,10 @@
 use crate::{env::RedisMode, response::ApiResponse};
 use rustis::{
     client::Client,
-    commands::{GenericCommands, InfoSection, ServerCommands, SetExpiration, StringCommands},
+    commands::{
+        GenericCommands, InfoSection, ScriptingCommands, ServerCommands, SetExpiration,
+        StringCommands,
+    },
     resp::BulkString,
 };
 use serde::{Serialize, de::DeserializeOwned};
@@ -12,6 +15,27 @@ use std::{
 
 #[derive(Serialize)]
 struct BulkStringRef<'a>(#[serde(serialize_with = "::rustis::resp::serialize_byte_buf")] &'a [u8]);
+
+const SCAN_COUNTERS_SCRIPT: &str = r#"
+local result = redis.call('SCAN', ARGV[1], 'MATCH', ARGV[2], 'COUNT', ARGV[3])
+local out = {result[1]}
+for _, key in ipairs(result[2]) do
+  out[#out + 1] = key
+  out[#out + 1] = tostring(redis.call('GET', key) or '0')
+  out[#out + 1] = tostring(redis.call('TTL', key))
+end
+return out
+"#;
+
+const SCAN_COUNT: &str = "500";
+const SCAN_MAX_ROUNDS: usize = 64;
+
+#[derive(Debug, Clone)]
+pub struct CounterEntry {
+    pub key: String,
+    pub value: i64,
+    pub ttl: i64,
+}
 
 pub struct Cache {
     pub client: Client,
@@ -159,6 +183,60 @@ impl Cache {
         }
 
         Ok(())
+    }
+
+    pub async fn used_memory(&self) -> Option<u64> {
+        let info: String = self.client.info([InfoSection::Memory]).await.ok()?;
+
+        info.lines()
+            .find_map(|line| line.strip_prefix("used_memory:"))
+            .and_then(|value| value.trim().parse().ok())
+    }
+
+    pub async fn scan_counters(
+        &self,
+        pattern: &str,
+        max_entries: usize,
+    ) -> Result<Vec<CounterEntry>, anyhow::Error> {
+        let mut entries = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut cursor = compact_str::CompactString::const_new("0");
+
+        for _ in 0..SCAN_MAX_ROUNDS {
+            let chunk: Vec<String> = self
+                .client
+                .eval(
+                    SCAN_COUNTERS_SCRIPT,
+                    Vec::<&str>::new(),
+                    [cursor.as_str(), pattern, SCAN_COUNT],
+                )
+                .await?;
+
+            let Some((next_cursor, values)) = chunk.split_first() else {
+                break;
+            };
+
+            for entry in values.as_chunks::<3>().0 {
+                if !seen.insert(entry[0].clone()) {
+                    continue;
+                }
+
+                entries.push(CounterEntry {
+                    key: entry[0].clone(),
+                    value: entry[1].parse().unwrap_or(0),
+                    ttl: entry[2].parse().unwrap_or(-1),
+                });
+            }
+
+            cursor = next_cursor.into();
+            if cursor == "0" || entries.len() >= max_entries {
+                break;
+            }
+        }
+
+        entries.truncate(max_entries);
+
+        Ok(entries)
     }
 
     pub async fn get<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, anyhow::Error> {

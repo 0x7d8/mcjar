@@ -68,6 +68,7 @@ pub struct AppState {
     pub cache: Arc<crate::cache::Cache>,
     pub requests: crate::requests::RequestLogger,
     pub files: crate::files::FileCache,
+    pub nodes: crate::nodes::NodeClient,
     pub env: Arc<crate::env::Env>,
     pub s3: Arc<crate::s3::S3>,
 }

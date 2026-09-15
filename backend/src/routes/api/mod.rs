@@ -6,6 +6,7 @@ use axum::{
 use utoipa_axum::router::OpenApiRouter;
 
 mod github;
+mod internal;
 mod organization;
 mod user;
 mod v1;
@@ -33,6 +34,7 @@ pub fn router(state: &State) -> OpenApiRouter<State> {
         .nest("/v3", v3::router(state))
         .nest("/organization", organization::router(state))
         .nest("/github", github::router(state))
+        .nest("/internal", internal::router(state))
         .nest("/user", user::router(state))
         .with_state(state.clone())
 }

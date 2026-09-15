@@ -5,6 +5,7 @@ pub mod deserialize;
 pub mod env;
 pub mod files;
 pub mod models;
+pub mod nodes;
 pub mod payload;
 pub mod prelude;
 pub mod requests;

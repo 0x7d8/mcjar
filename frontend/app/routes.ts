@@ -6,6 +6,7 @@ export default [
   route('lookup', 'pages/lookup.tsx'),
   route('job-status', 'pages/job-status.tsx'),
   route('organizations', 'pages/organizations.tsx'),
+  route('admin', 'pages/admin.tsx'),
   route(':type/config', 'pages/{type}/config.tsx'),
   route(':type/versions', 'pages/{type}/versions.tsx'),
   route(':type/statistics', 'pages/{type}/statistics.tsx'),

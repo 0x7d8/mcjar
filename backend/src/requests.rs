@@ -19,6 +19,7 @@ use std::{
     time::Instant,
 };
 use tokio::sync::Mutex;
+use utoipa::ToSchema;
 
 pub struct Request {
     id: String,
@@ -235,14 +236,18 @@ pub enum RateLimitError {
     Bandwidth { limit: i64, used: i64, reset: i64 },
 }
 
-#[derive(Debug, Clone, Copy)]
-enum RateLimitBucket {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+#[schema(rename_all = "snake_case")]
+pub enum RateLimitBucket {
     Regular,
     FilesBrowse,
     FilesDownload,
 }
 
 impl RateLimitBucket {
+    pub const ALL: [Self; 3] = [Self::Regular, Self::FilesBrowse, Self::FilesDownload];
+
     fn from_request(path: &str, method: &Method) -> Self {
         if path != "/files" && !path.starts_with("/files/") {
             return Self::Regular;
@@ -255,7 +260,7 @@ impl RateLimitBucket {
         }
     }
 
-    fn suffix(self) -> &'static str {
+    pub fn suffix(self) -> &'static str {
         match self {
             Self::Regular => "regular",
             Self::FilesBrowse => "files",
@@ -263,7 +268,7 @@ impl RateLimitBucket {
         }
     }
 
-    fn limit(self, organization: Option<&Organization>) -> i64 {
+    pub fn limit(self, organization: Option<&Organization>) -> i64 {
         let base = match self {
             Self::Regular | Self::FilesBrowse => 120,
             Self::FilesDownload => 30,
@@ -301,12 +306,129 @@ end
 return {used, ttl}
 "#;
 
+pub const RATELIMIT_KEY_PREFIX: &str = "mcjars_api::ratelimit::";
+pub const BANDWIDTH_KEY_PREFIX: &str = "mcjars_api::bandwidth::";
+const BANDWIDTH_ORGANIZATION_INFIX: &str = "organization::";
+
+const SNAPSHOT_MAX_ENTRIES: usize = 5000;
+
+#[inline]
+fn ratelimit_key(ip: std::net::IpAddr, bucket: RateLimitBucket) -> String {
+    format!("{RATELIMIT_KEY_PREFIX}{ip}::{}", bucket.suffix())
+}
+
 #[inline]
 fn bandwidth_key(ip: std::net::IpAddr, organization_id: Option<i32>) -> String {
     match organization_id {
-        Some(id) => format!("mcjars_api::bandwidth::organization::{id}"),
-        None => format!("mcjars_api::bandwidth::{ip}"),
+        Some(id) => format!("{BANDWIDTH_KEY_PREFIX}{BANDWIDTH_ORGANIZATION_INFIX}{id}"),
+        None => format!("{BANDWIDTH_KEY_PREFIX}{ip}"),
     }
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+#[schema(rename_all = "camelCase")]
+pub struct RateLimitSnapshot {
+    pub ip: String,
+    pub bucket: RateLimitBucket,
+
+    pub hits: i64,
+    pub limit: i64,
+    pub reset: i64,
+}
+
+#[derive(ToSchema, Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+#[schema(rename_all = "camelCase")]
+pub struct BandwidthSnapshot {
+    pub ip: Option<String>,
+    pub organization_id: Option<i32>,
+
+    pub used: i64,
+    pub reset: i64,
+}
+
+#[inline]
+pub fn bandwidth_limit_for(verified: bool) -> i64 {
+    if verified {
+        BANDWIDTH_LIMIT_VERIFIED
+    } else {
+        BANDWIDTH_LIMIT
+    }
+}
+
+pub fn parse_ratelimit_key(key: &str) -> Option<(&str, RateLimitBucket)> {
+    let rest = key.strip_prefix(RATELIMIT_KEY_PREFIX)?;
+
+    RateLimitBucket::ALL.iter().find_map(|bucket| {
+        rest.strip_suffix(bucket.suffix())
+            .and_then(|ip| ip.strip_suffix("::"))
+            .map(|ip| (ip, *bucket))
+    })
+}
+
+pub async fn ratelimit_snapshot(
+    cache: &crate::cache::Cache,
+) -> Result<Vec<RateLimitSnapshot>, anyhow::Error> {
+    let entries = cache
+        .scan_counters(
+            &format!("{RATELIMIT_KEY_PREFIX}*"),
+            SNAPSHOT_MAX_ENTRIES,
+        )
+        .await?;
+
+    let mut snapshots = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let Some((ip, bucket)) = parse_ratelimit_key(&entry.key) else {
+            continue;
+        };
+
+        snapshots.push(RateLimitSnapshot {
+            ip: ip.to_string(),
+            bucket,
+            hits: entry.value,
+            limit: bucket.limit(None),
+            reset: entry.ttl.max(0),
+        });
+    }
+
+    Ok(snapshots)
+}
+
+pub async fn bandwidth_snapshot(
+    cache: &crate::cache::Cache,
+) -> Result<Vec<BandwidthSnapshot>, anyhow::Error> {
+    let entries = cache
+        .scan_counters(
+            &format!("{BANDWIDTH_KEY_PREFIX}*"),
+            SNAPSHOT_MAX_ENTRIES,
+        )
+        .await?;
+
+    let mut snapshots = Vec::with_capacity(entries.len());
+
+    for entry in entries {
+        let Some(rest) = entry.key.strip_prefix(BANDWIDTH_KEY_PREFIX) else {
+            continue;
+        };
+
+        let (ip, organization_id) = match rest.strip_prefix(BANDWIDTH_ORGANIZATION_INFIX) {
+            Some(id) => match id.parse::<i32>() {
+                Ok(id) => (None, Some(id)),
+                Err(_) => continue,
+            },
+            None => (Some(rest.to_string()), None),
+        };
+
+        snapshots.push(BandwidthSnapshot {
+            ip,
+            organization_id,
+            used: entry.value,
+            reset: entry.ttl.max(0),
+        });
+    }
+
+    Ok(snapshots)
 }
 
 #[inline]
@@ -354,6 +476,13 @@ impl RequestLogger {
         }
     }
 
+    pub async fn queue_depth(&self) -> (usize, usize) {
+        (
+            self.processing.lock().await.len(),
+            self.processing_files.lock().await.len(),
+        )
+    }
+
     pub async fn log(
         &self,
         request: &Parts,
@@ -368,7 +497,7 @@ impl RequestLogger {
 
         let mut ratelimit: Option<RateLimitData> = None;
         if organization.is_none_or(|o| !o.verified) {
-            let ratelimit_key = format!("mcjars_api::ratelimit::{ip}::{}", bucket.suffix());
+            let ratelimit_key = ratelimit_key(ip, bucket);
 
             let (hits, reset): (i64, i64) = self
                 .cache
@@ -414,6 +543,7 @@ impl RequestLogger {
         if ACCEPTED_METHODS.iter().all(|m| *m != request.method)
             || !request.uri.path().starts_with("/api")
             || request.uri.path().starts_with("/api/github")
+            || request.uri.path().starts_with("/api/internal")
         {
             return Ok((None, ratelimit));
         };

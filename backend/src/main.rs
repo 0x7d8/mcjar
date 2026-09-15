@@ -231,6 +231,7 @@ async fn main() {
             cache.clone(),
         ),
         files: api::files::FileCache::new(database.clone(), env.clone()).await,
+        nodes: api::nodes::NodeClient::new(database.clone(), env.clone()),
         env,
         s3,
     });
@@ -261,6 +262,21 @@ async fn main() {
                     tracing::error!("failed to process files: {:?}", err);
                     sentry_anyhow::capture_anyhow(&err);
                 }
+            }
+        });
+    }
+
+    if state.nodes.name().is_some() && state.env.node_url.is_some() {
+        let state = state.clone();
+
+        tokio::spawn(async move {
+            loop {
+                if let Err(err) = state.nodes.heartbeat(&state.version).await {
+                    tracing::error!("failed to heartbeat node: {:?}", err);
+                    sentry_anyhow::capture_anyhow(&err);
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(15)).await;
             }
         });
     }

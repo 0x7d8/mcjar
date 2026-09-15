@@ -8,6 +8,7 @@ use utoipa::ToSchema;
 pub mod build;
 pub mod config;
 pub mod file;
+pub mod node;
 pub mod organization;
 pub mod r#type;
 pub mod user;

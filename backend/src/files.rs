@@ -69,6 +69,20 @@ impl FileCache {
         }
     }
 
+    #[inline]
+    pub fn max_cache_size(&self) -> u64 {
+        self.max_cache_size
+    }
+
+    #[inline]
+    pub fn cache_size(&self) -> u64 {
+        self.total_size.load(Ordering::Relaxed)
+    }
+
+    pub async fn cached_file_count(&self) -> usize {
+        self.cached_files.read().await.len()
+    }
+
     /// Returns whether the file was already resident in the local cache alongside its reader.
     pub async fn get(
         &self,
