@@ -230,6 +230,12 @@ pub struct RateLimitData {
 }
 
 #[derive(Debug, Clone, Copy)]
+pub enum RateLimitError {
+    Requests(RateLimitData),
+    Bandwidth { limit: i64, used: i64, reset: i64 },
+}
+
+#[derive(Debug, Clone, Copy)]
 enum RateLimitBucket {
     Regular,
     FilesBrowse,
@@ -282,6 +288,36 @@ end
 return {hits, ttl}
 "#;
 
+const BANDWIDTH_WINDOW: i64 = 60 * 60 * 24;
+const BANDWIDTH_LIMIT: i64 = 25 * 1024 * 1024 * 1024;
+const BANDWIDTH_LIMIT_VERIFIED: i64 = 100 * 1024 * 1024 * 1024;
+const BANDWIDTH_SCRIPT: &str = r#"
+local used = redis.call('INCRBY', KEYS[1], ARGV[1])
+local ttl = redis.call('TTL', KEYS[1])
+if ttl < 0 then
+  redis.call('EXPIRE', KEYS[1], ARGV[2])
+  ttl = tonumber(ARGV[2])
+end
+return {used, ttl}
+"#;
+
+#[inline]
+fn bandwidth_key(ip: std::net::IpAddr, organization_id: Option<i32>) -> String {
+    match organization_id {
+        Some(id) => format!("mcjars_api::bandwidth::organization::{id}"),
+        None => format!("mcjars_api::bandwidth::{ip}"),
+    }
+}
+
+#[inline]
+fn bandwidth_limit(organization: Option<&Organization>) -> i64 {
+    if organization.is_some_and(|o| o.verified) {
+        BANDWIDTH_LIMIT_VERIFIED
+    } else {
+        BANDWIDTH_LIMIT
+    }
+}
+
 pub struct RequestLogger {
     pending: Mutex<Vec<Request>>,
     processing: Mutex<Vec<Request>>,
@@ -322,15 +358,16 @@ impl RequestLogger {
         &self,
         request: &Parts,
         organization: Option<&Organization>,
-    ) -> Result<(Option<String>, Option<RateLimitData>), Option<RateLimitData>> {
+    ) -> Result<(Option<String>, Option<RateLimitData>), RateLimitError> {
         let ip = match crate::utils::extract_ip(&request.headers) {
             Some(ip) => ip,
             None => std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         };
 
+        let bucket = RateLimitBucket::from_request(request.uri.path(), &request.method);
+
         let mut ratelimit: Option<RateLimitData> = None;
         if organization.is_none_or(|o| !o.verified) {
-            let bucket = RateLimitBucket::from_request(request.uri.path(), &request.method);
             let ratelimit_key = format!("mcjars_api::ratelimit::{ip}::{}", bucket.suffix());
 
             let (hits, reset): (i64, i64) = self
@@ -352,7 +389,23 @@ impl RequestLogger {
             ratelimit = Some(data);
 
             if hits > data.limit {
-                return Err(ratelimit);
+                return Err(RateLimitError::Requests(data));
+            }
+        }
+
+        if matches!(bucket, RateLimitBucket::FilesDownload) {
+            let key = bandwidth_key(ip, organization.map(|o| o.id));
+            let limit = bandwidth_limit(organization);
+
+            let (used, reset): (i64, i64) = self
+                .cache
+                .client
+                .eval(BANDWIDTH_SCRIPT, [key.as_str()], [0, BANDWIDTH_WINDOW])
+                .await
+                .unwrap_or((0, BANDWIDTH_WINDOW));
+
+            if used >= limit {
+                return Err(RateLimitError::Bandwidth { limit, used, reset });
             }
         }
 
@@ -511,15 +564,33 @@ impl RequestLogger {
     pub async fn finish_file(&self, id: String, status: i16, time: i32, bytes_sent: i64) {
         let mut pending = self.pending_files.lock().await;
 
-        if let Some(index) = pending.iter().position(|r| r.id == id) {
-            let mut request = pending.remove(index);
+        let Some(index) = pending.iter().position(|r| r.id == id) else {
+            return;
+        };
 
-            request.status = status;
-            request.time = time;
-            request.bytes_sent = bytes_sent;
+        let mut request = pending.remove(index);
+        drop(pending);
 
-            self.processing_files.lock().await.push(request);
+        request.status = status;
+        request.time = time;
+        request.bytes_sent = bytes_sent;
+
+        if bytes_sent > 0 {
+            let key = bandwidth_key(request.ip.ip(), request.organization_id);
+
+            let _: (i64, i64) = self
+                .cache
+                .client
+                .eval(
+                    BANDWIDTH_SCRIPT,
+                    [key.as_str()],
+                    [bytes_sent, BANDWIDTH_WINDOW],
+                )
+                .await
+                .unwrap_or((0, BANDWIDTH_WINDOW));
         }
+
+        self.processing_files.lock().await.push(request);
     }
 
     #[inline]

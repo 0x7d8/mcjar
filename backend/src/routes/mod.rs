@@ -1,4 +1,4 @@
-use crate::{models::organization::Organization, response::ApiResponse};
+use crate::{models::organization::Organization, requests::RateLimitError, response::ApiResponse};
 use axum::{
     body::Body,
     extract::Request,
@@ -89,25 +89,32 @@ async fn handle_api_request(state: GetState, req: Request, next: Next) -> Respon
     let (parts, body) = req.into_parts();
     let request_id = state.requests.log(&parts, organization.as_ref()).await;
 
-    if let Err(Some(ratelimit)) = request_id {
-        return ApiResponse::error("too many requests")
-            .with_status(StatusCode::TOO_MANY_REQUESTS)
-            .with_header("X-RateLimit-Limit", &ratelimit.limit.to_string())
-            .with_header(
-                "X-RateLimit-Remaining",
-                &(ratelimit.limit - ratelimit.hits).max(0).to_string(),
-            )
-            .with_header("X-RateLimit-Reset", &ratelimit.reset.to_string())
-            .with_header("Retry-After", &ratelimit.reset.to_string())
-            .into_response();
-    } else if let Err(None) = request_id {
-        return ApiResponse::error("broken request, likely invalid IP")
-            .with_status(StatusCode::BAD_REQUEST)
-            .into_response();
-    }
+    let (request_id, ratelimit) = match request_id {
+        Ok(request_id) => request_id,
+        Err(RateLimitError::Requests(ratelimit)) => {
+            return ApiResponse::error("too many requests")
+                .with_status(StatusCode::TOO_MANY_REQUESTS)
+                .with_header("X-RateLimit-Limit", &ratelimit.limit.to_string())
+                .with_header(
+                    "X-RateLimit-Remaining",
+                    &(ratelimit.limit - ratelimit.hits).max(0).to_string(),
+                )
+                .with_header("X-RateLimit-Reset", &ratelimit.reset.to_string())
+                .with_header("Retry-After", &ratelimit.reset.to_string())
+                .into_response();
+        }
+        Err(RateLimitError::Bandwidth { limit, used, reset }) => {
+            return ApiResponse::error("daily bandwidth limit exceeded")
+                .with_status(StatusCode::TOO_MANY_REQUESTS)
+                .with_header("X-Bandwidth-Limit", &limit.to_string())
+                .with_header("X-Bandwidth-Remaining", &(limit - used).max(0).to_string())
+                .with_header("X-Bandwidth-Reset", &reset.to_string())
+                .with_header("Retry-After", &reset.to_string())
+                .into_response();
+        }
+    };
 
     let mut headers = HeaderMap::new();
-    let (request_id, ratelimit) = request_id.unwrap();
     if let Some(request_id) = &request_id {
         headers.insert("X-Request-ID", request_id.parse().unwrap());
     }
